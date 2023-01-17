@@ -1,4 +1,4 @@
-// https : // judge.u-aizu.ac.jp/onlinejudge/description.jsp?id=ITP1_7_B&lang=ja
+// https://judge.u-aizu.ac.jp/onlinejudge/description.jsp?id=ITP1_7_B&lang=ja
 #include <stdio.h>
 int main()
 {
