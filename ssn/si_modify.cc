@@ -36,16 +36,23 @@ class nodedef
 {
 public:
     int nversion;
-    int data;
+    int key;
+};
+
+class workernodedef
+{
+public:
+    int nversion;
+    int key;
     int dataitem;
 };
 
 class ope
 {
 public:
-    txop operation;              // READ or WRITE
-    int dataitem;                // writeしたいデータの位置
-    int key;                     // writeしたいデータの値
+    txop operation; // READ or WRITE
+    int dataitem;   // writeしたいデータの位置
+    int key;        // writeしたいデータの値
 };
 
 class txdef
@@ -55,7 +62,7 @@ public:
     int status = 0; // inflight=0, commit=1, abort=2
     int startTs;
     int commitTs;
-    std::vector<nodedef> worker;
+    std::vector<workernodedef> worker;
 };
 
 // databaseを生成して初期化
@@ -65,7 +72,7 @@ std::vector<std::vector<class nodedef>> generate_database(void)
     nodedef tmp;
     for (int i = 0; i < N; i++)
     {
-        tmp.data = 0;
+        tmp.key = 0;
         tmp.nversion = 0;
         database.at(i).push_back(tmp);
     }
@@ -111,14 +118,14 @@ txdef generate_transaction()
 }
 
 // write operation
-nodedef write(txdef transaction, int key, int dataitem)
+std::vector<workernodedef> write(txdef transaction, int key, int dataitem)
 {
-    nodedef tmp;
-    tmp.data = key;
+    workernodedef tmp;
+    tmp.key = key;
     tmp.nversion = transaction.startTs;
     tmp.dataitem = dataitem;
     transaction.worker.push_back(tmp);
-    return tmp;
+    return transaction.worker;
 }
 
 // read operation
@@ -139,33 +146,37 @@ txdef execution(txdef tx)
         }
         if (p->operation == txop::WRITE)
         {
-           write(tx, p->key, p->dataitem);
+            tx.worker = write(tx, p->key, p->dataitem);
         }
     }
     return tx;
 }
 
-//commit phase
-std::vector<std::vector<class nodedef>> commit(txdef tx, std::vector<std::vector<class nodedef>>database){
-for (auto p=tx.worker.begin(); p !=tx.worker.end(); p++){
-    database.at(p->dataitem).emplace_back(p);
+// commit phase
+std::vector<std::vector<class nodedef>> commit(txdef tx, std::vector<std::vector<class nodedef>> database)
+{
+    for (auto p = tx.worker.begin(); p != tx.worker.end(); p++)
+    {
+        nodedef tmp;
+        tmp.key = p->key;
+        tmp.nversion = p->nversion;
+        database.at(p->dataitem).push_back(tmp);
+    }
+    return database;
 }
-return database;
-}
-
 
 // database(vector)の中身を表示
 void show_database(std::vector<std::vector<class nodedef>> database)
 {
     for (int i = 0; i < N; i++)
     {
-        printf("%d ", database[i][database.at(i).size() - 1].data);
+        printf("%d ", database[i][database.at(i).size() - 1].key);
         // std::cout << data[i][data.at(i).size() - 1] << std::endl;
     }
 }
 
 // validation phase
-std::vector<std::vector<class nodedef>> validation(txdef tx, std::vector<std::vector<class nodedef>>database)
+std::vector<std::vector<class nodedef>> validation(txdef tx, std::vector<std::vector<class nodedef>> database)
 {
     // commit timestampを設定
     tx.commitTs = gettimestamp();
@@ -179,18 +190,19 @@ std::vector<std::vector<class nodedef>> validation(txdef tx, std::vector<std::ve
         }
     }
     // 判定
-    for (auto p = Tsstore.begin(); p != Tsstore.end(); p++)
+    /*for (auto p = Tsstore.begin(); p != Tsstore.end(); p++)
     {
         // first committers wins
         if (p->startTs <= tx.startTs && tx.startTs <= p->commitTs)
         {
+            // abort
             tx.status = 2;
             return database;
         }
-    }
+    }*/
     // commit
-        tx.status = 1;
-        database= commit(tx, database);
+    tx.status = 1;
+    database = commit(tx, database);
     return database;
 }
 
@@ -219,16 +231,15 @@ int main()
     // transaction t1の実行
     txdef t1 = generate_transaction();
     t1 = execution(t1);
-    // show_transaction(t1);
-    database = validation(t1,database);
-    // std::cout << t1.begin()->status << std::endl;
+    show_transaction(t1);
+    database = validation(t1, database);
+    //  std::cout << t1.begin()->status << std::endl;
 
     // transaction t2の実行
-    txdef t2 = generate_transaction();
-    t2 = execution(t2);
+    // txdef t2 = generate_transaction();
+    // t2 = execution(t2);
     // show_transaction(t2);
-    database = validation(t2,database);
-    // std::cout << t2.begin()->status << std::endl;
+    // database = validation(t2, database);
 
     // databaseの状態を表示
     show_database(database);
