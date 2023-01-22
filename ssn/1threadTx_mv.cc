@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-// #include <time.h>
+#include <time.h>
 #include <vector>
 #include <random>
 #include <iostream>
@@ -86,7 +86,7 @@ std::vector<txdefinition> generate_transaction()
 // write operation
 void write(int dataitem, int key)
 {
-    data.at(dataitem).push_back(key);
+    data.at(dataitem).emplace_back(key);
 }
 
 // read operation

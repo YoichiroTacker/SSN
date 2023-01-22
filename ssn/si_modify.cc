@@ -32,17 +32,6 @@ enum class txop
     WRITE,
 };
 
-class txdef
-{
-public:
-    txop operation;
-    int dataitem;
-    int key;
-    int status = 0; // inflight=0, commit=1, abort=2
-    int startTs;
-    int commitTs;
-};
-
 class nodedef
 {
 public:
@@ -50,12 +39,22 @@ public:
     int data;
 };
 
-class worker
+class ope
 {
 public:
-    int dataitem;
+    txop operation;              // READ or WRITE
+    int dataitem;                // writeしたいデータの位置
+    int key;                     // writeしたいデータの値
+    std::vector<nodedef> worker; // worker thread
+};
+
+class txdef
+{
+public:
+    std::vector<ope> txinfo;
+    int status = 0; // inflight=0, commit=1, abort=2
     int startTs;
-    int key;
+    int commitTs;
 };
 
 // databaseを生成して初期化
@@ -82,13 +81,20 @@ uint64_t get_rand(uint64_t min_val, uint64_t max_val)
 }
 
 // transactionの生成
-std::vector<txdef> generate_transaction()
+txdef generate_transaction()
 {
-    std::vector<txdef> transaction;
+    txdef transaction;
     int operation_size = get_rand(1, 10);
-    txdef tmp;
+    transaction.startTs = gettimestamp();
+    transaction.status = 0;
+    // TsstoreにstartTsを追加する
+    concurrenttx_idetifier tmp;
+    tmp.startTs = transaction.startTs;
+    Tsstore.push_back(tmp);
+
     for (int i = 0; i < operation_size; i++)
     {
+        ope tmp;
         if (get_rand(0, 100) % 2 == 0)
         {
             tmp.operation = txop::READ;
@@ -99,21 +105,19 @@ std::vector<txdef> generate_transaction()
             tmp.key = get_rand(0, 100);
         }
         tmp.dataitem = get_rand(0, N - 1);
-        tmp.startTs = gettimestamp();
-        transaction.push_back(tmp);
+        transaction.txinfo.push_back(tmp);
     }
     return transaction;
 }
 
 // write operation
-std::vector<std::vector<class nodedef>> write(int dataitem, int key, int startTs, std::vector<std::vector<class nodedef>> database)
+/*nodedef write(ope txinfo, int startTs)
 {
     nodedef tmp;
-    tmp.data = key;
+    tmp.data = txinfo.key;
     tmp.nversion = startTs;
-    database.at(dataitem).emplace_back(tmp);
-    return database;
-}
+    return tmp;
+}*/
 
 // read operation
 void read(int dataitem)
@@ -123,9 +127,9 @@ void read(int dataitem)
 }
 
 // transactionの実行
-std::vector<std::vector<class nodedef>> execution(std::vector<txdef> transaction, std::vector<std::vector<class nodedef>> database)
+txdef execution(txdef transaction, std::vector<std::vector<class nodedef>> database)
 {
-    for (auto p = transaction.begin(); p != transaction.end(); p++)
+    for (auto p = transaction.txinfo.begin(); p != transaction.txinfo.end(); p++)
     {
         if (p->operation == txop::READ)
         {
@@ -133,13 +137,13 @@ std::vector<std::vector<class nodedef>> execution(std::vector<txdef> transaction
         }
         if (p->operation == txop::WRITE)
         {
-            database = write(p->dataitem, p->key, p->startTs, database);
+            nodedef tmp;
+            tmp.data = p->key;
+            tmp.nversion = transaction.startTs;
+            p->worker.push_back(tmp); // WRITE OPERATION
         }
     }
-    // TsstoreにstartTsを追加する
-    concurrenttx_idetifier tmp;
-    tmp.startTs = transaction.begin()->startTs;
-    return database;
+    return transaction;
 }
 
 // database(vector)の中身を表示
@@ -190,7 +194,7 @@ std::vector<txdef> validation(std::vector<txdef> tx)
 }
 
 // transactionの中身を表示
-void show_transaction(std::vector<txdef> transaction)
+void show_transaction(txdef transaction)
 {
     std::cout << "new transaction" << std::endl;
     for (auto p = transaction.begin(); p != transaction.end(); p++)
@@ -212,15 +216,15 @@ int main()
     std::vector<std::vector<class nodedef>> database = generate_database();
 
     // transaction t1の実行
-    std::vector<txdef> t1 = generate_transaction();
-    database = execution(t1, database);
+    txdef t1 = generate_transaction();
+    t1 = execution(t1, database);
     // show_transaction(t1);
     t1 = validation(t1);
     // std::cout << t1.begin()->status << std::endl;
 
     // transaction t2の実行
-    std::vector<txdef> t2 = generate_transaction();
-    database = execution(t2, database);
+    txdef t2 = generate_transaction();
+    t2 = execution(t2, database);
     // show_transaction(t2);
     t2 = validation(t2);
     // std::cout << t2.begin()->status << std::endl;
