@@ -37,6 +37,7 @@ class nodedef
 public:
     int nversion;
     int data;
+    int dataitem;
 };
 
 class ope
@@ -45,7 +46,6 @@ public:
     txop operation;              // READ or WRITE
     int dataitem;                // writeしたいデータの位置
     int key;                     // writeしたいデータの値
-    std::vector<nodedef> worker; // worker thread
 };
 
 class txdef
@@ -55,11 +55,11 @@ public:
     int status = 0; // inflight=0, commit=1, abort=2
     int startTs;
     int commitTs;
+    std::vector<nodedef> worker;
 };
 
 // databaseを生成して初期化
-std::vector<std::vector<class nodedef>>
-generate_database(void)
+std::vector<std::vector<class nodedef>> generate_database(void)
 {
     std::vector<std::vector<class nodedef>> database(N);
     nodedef tmp;
@@ -111,13 +111,15 @@ txdef generate_transaction()
 }
 
 // write operation
-/*nodedef write(ope txinfo, int startTs)
+nodedef write(txdef transaction, int key, int dataitem)
 {
     nodedef tmp;
-    tmp.data = txinfo.key;
-    tmp.nversion = startTs;
+    tmp.data = key;
+    tmp.nversion = transaction.startTs;
+    tmp.dataitem = dataitem;
+    transaction.worker.push_back(tmp);
     return tmp;
-}*/
+}
 
 // read operation
 void read(int dataitem)
@@ -127,9 +129,9 @@ void read(int dataitem)
 }
 
 // transactionの実行
-txdef execution(txdef transaction, std::vector<std::vector<class nodedef>> database)
+txdef execution(txdef tx)
 {
-    for (auto p = transaction.txinfo.begin(); p != transaction.txinfo.end(); p++)
+    for (auto p = tx.txinfo.begin(); p != tx.txinfo.end(); p++)
     {
         if (p->operation == txop::READ)
         {
@@ -137,14 +139,20 @@ txdef execution(txdef transaction, std::vector<std::vector<class nodedef>> datab
         }
         if (p->operation == txop::WRITE)
         {
-            nodedef tmp;
-            tmp.data = p->key;
-            tmp.nversion = transaction.startTs;
-            p->worker.push_back(tmp); // WRITE OPERATION
+           write(tx, p->key, p->dataitem);
         }
     }
-    return transaction;
+    return tx;
 }
+
+//commit phase
+std::vector<std::vector<class nodedef>> commit(txdef tx, std::vector<std::vector<class nodedef>>database){
+for (auto p=tx.worker.begin(); p !=tx.worker.end(); p++){
+    database.at(p->dataitem).emplace_back(p);
+}
+return database;
+}
+
 
 // database(vector)の中身を表示
 void show_database(std::vector<std::vector<class nodedef>> database)
@@ -156,17 +164,17 @@ void show_database(std::vector<std::vector<class nodedef>> database)
     }
 }
 
-// commit operation
-std::vector<txdef> validation(std::vector<txdef> tx)
+// validation phase
+std::vector<std::vector<class nodedef>> validation(txdef tx, std::vector<std::vector<class nodedef>>database)
 {
-    // commit timestampを設定する
-    tx.begin()->commitTs = gettimestamp();
+    // commit timestampを設定
+    tx.commitTs = gettimestamp();
     // 判定を行うためにTsstoreにcommitTsを追加する
     for (auto p = Tsstore.begin(); p != Tsstore.end(); p++)
     {
-        if (p->startTs == tx.begin()->startTs)
+        if (p->startTs == tx.startTs)
         {
-            p->commitTs = tx.begin()->commitTs;
+            p->commitTs = tx.commitTs;
             break;
         }
     }
@@ -174,39 +182,32 @@ std::vector<txdef> validation(std::vector<txdef> tx)
     for (auto p = Tsstore.begin(); p != Tsstore.end(); p++)
     {
         // first committers wins
-        if (p->startTs <= tx.begin()->startTs && tx.begin()->startTs <= p->commitTs)
+        if (p->startTs <= tx.startTs && tx.startTs <= p->commitTs)
         {
-            // abort
-            if (tx.begin()->status == 0)
-            {
-                tx.begin()->status = 2;
-                // rollback();
-                break;
-            }
+            tx.status = 2;
+            return database;
         }
     }
     // commit
-    if (tx.begin()->status == 0)
-    {
-        tx.begin()->status = 1;
-    }
-    return tx;
+        tx.status = 1;
+        database= commit(tx, database);
+    return database;
 }
 
 // transactionの中身を表示
 void show_transaction(txdef transaction)
 {
     std::cout << "new transaction" << std::endl;
-    for (auto p = transaction.begin(); p != transaction.end(); p++)
+    for (auto p = transaction.txinfo.begin(); p != transaction.txinfo.end(); p++)
     {
         if (p->operation == txop::READ)
         {
-            std::cout << "READ array["
+            std::cout << "READ vector["
                       << p->dataitem << "]" << std::endl;
         }
         else
         {
-            std::cout << "WRITE array[" << p->dataitem << "] " << p->key << std::endl;
+            std::cout << "WRITE vector[" << p->dataitem << "] " << p->key << std::endl;
         }
     }
 }
@@ -217,16 +218,16 @@ int main()
 
     // transaction t1の実行
     txdef t1 = generate_transaction();
-    t1 = execution(t1, database);
+    t1 = execution(t1);
     // show_transaction(t1);
-    t1 = validation(t1);
+    database = validation(t1,database);
     // std::cout << t1.begin()->status << std::endl;
 
     // transaction t2の実行
     txdef t2 = generate_transaction();
-    t2 = execution(t2, database);
+    t2 = execution(t2);
     // show_transaction(t2);
-    t2 = validation(t2);
+    database = validation(t2,database);
     // std::cout << t2.begin()->status << std::endl;
 
     // databaseの状態を表示
