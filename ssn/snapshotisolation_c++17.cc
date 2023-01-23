@@ -12,49 +12,28 @@
 
 #define N 10 // databaseのサイズ
 
-// timestamp counterのlock
-int counter = 0;
-std::mutex countmtx_;
+int counter = 0;      // timestamp用のcounter
+std::mutex countmtx_; // timestampのlock
 
-// Tsstore用lock
-std::mutex tsstoremtx_;
+std::mutex showmtx_; // transaction表示用のlock
 
-// transaction表示用のlock
-std::mutex showmtx_;
+std::vector<std::vector<class nodedef>> database(N); // database
+std::mutex dbmtx_;                                   // database用のlock
 
-/*void *count(void *arg)
-{
-    struct counter *a = (struct counter *)arg;
-
-    pthread_mutex_lock(a->lock);
-    for (int i = 0; i < 1000 * 1000; i++)
-    {
-        (*(int *)a->num)++;
-    }
-    pthread_mutex_unlock(a->lock);
-
-    return NULL;
-}*/
-
-// database
-std::vector<std::vector<class nodedef>> database(N);
-// database用mutex
-std::mutex dbmtx_;
-
-class concurrenttx_idetifier
+class tsstoredef
 {
 public:
     int startTs;
     int commitTs;
 };
 
-std::vector<class concurrenttx_idetifier> Tsstore; // timestamp store
+std::vector<class tsstoredef> Tsstore; // timestamp store
+std::mutex tsstoremtx_;                // Tsstore用lock
 
 // timestamp
 int gettimestamp(void)
 {
-    // counterのlockを取得
-    std::lock_guard<std::mutex> lock(countmtx_);
+    std::lock_guard<std::mutex> lock(countmtx_); // counterのlockを取得
     counter++;
     return counter;
 }
@@ -101,7 +80,6 @@ public:
 // databaseを生成して初期化
 void generate_database(void)
 {
-    // std::vector<std::vector<class nodedef>> database(N);
     nodedef tmp;
     for (int i = 0; i < N; i++)
     {
@@ -120,14 +98,6 @@ uint64_t get_rand(uint64_t min_val, uint64_t max_val)
     return get_rand_uni_int(mt64);
 }
 
-void setstartTs(const txdef *tx)
-{
-    std::lock_guard<std::mutex> lock(tsstoremtx_);
-    concurrenttx_idetifier tmp;
-    tmp.startTs = tx->startTs;
-    Tsstore.push_back(tmp);
-}
-
 // transactionの生成
 txdef generate_transaction()
 {
@@ -135,8 +105,6 @@ txdef generate_transaction()
     int operation_size = get_rand(1, 10);
     transaction.startTs = gettimestamp();
     transaction.status = 0;
-    // TsstoreにstartTsを追加する
-    setstartTs(&transaction);
 
     for (int i = 0; i < operation_size; i++)
     {
@@ -188,14 +156,12 @@ void execution(txdef *tx)
             write(tx->worker, p->key, p->dataitem, tx->startTs);
         }
     }
-    return;
 }
 
 // commit phase
-void commit(txdef *tx, std::vector<std::vector<class nodedef>> &database)
+void commit(txdef *tx)
 {
-    // databaseのlockを取得
-    std::lock_guard<std::mutex> lock(dbmtx_);
+    std::lock_guard<std::mutex> lock(dbmtx_); // databaseのlockを取得
     for (auto p = tx->worker.begin(); p != tx->worker.end(); p++)
     {
         nodedef tmp;
@@ -203,68 +169,95 @@ void commit(txdef *tx, std::vector<std::vector<class nodedef>> &database)
         tmp.nversion = p->nversion;
         database.at(p->dataitem).push_back(tmp);
     }
-    return;
 }
 
-// database(vector)の中身を表示
-void show_database(void)
+void setTimestamp(txdef *tx) // timestampを設定
 {
-    for (int i = 0; i < N; i++)
-    {
-        printf("%d ", database[i][database.at(i).size() - 1].key);
-        // std::cout << data[i][data.at(i).size() - 1] << std::endl;
-    }
-}
-
-void setcommitTs(txdef *tx)
-{
-    // commit timestampを設定
-    tx->commitTs = gettimestamp();
-    // Tsstoreのlockを取得
     std::lock_guard<std::mutex> lock(tsstoremtx_);
-    // 判定を行うためにTsstoreにcommitTsを追加する
-    for (auto p = Tsstore.begin(); p != Tsstore.end(); p++)
-    {
-        if (p->startTs == tx->startTs)
-        {
-            p->commitTs = tx->commitTs;
-            break;
-        }
-    }
+    tsstoredef tmp;
+    tmp.startTs = tx->startTs;
+    tmp.commitTs = tx->commitTs;
+    Tsstore.push_back(tmp);
 }
 
-// validation phase
-void validation(txdef *tx, std::vector<std::vector<class nodedef>> &database)
-{
-    setcommitTs(tx);
+void validation(txdef *tx);
 
-    //   判定
+void rollback(txdef *tx)
+{
+    tx->status = 0;
+    tx->startTs = gettimestamp();
+    tx->commitTs = 0;
+    tx->worker.clear();
+    execution(tx);
+    validation(tx);
+}
+
+void Tscomparison(txdef *tx)
+{
+    std::lock_guard<std::mutex> lock(tsstoremtx_);
     for (auto p = Tsstore.begin(); p != Tsstore.end(); p++)
     {
         // first committers wins
-        if (p->startTs < tx->startTs && tx->startTs < p->commitTs)
+        if ((p->startTs <= tx->startTs && tx->startTs < p->commitTs) || (tx->startTs <= p->startTs && p->startTs < tx->commitTs))
         {
             // abort
             tx->status = 2;
             return;
         }
     }
-    // commit
-    tx->status = 1;
-    commit(tx, database);
     return;
 }
 
-void show_identifier(void)
+// validation phase
+void validation(txdef *tx)
 {
-    for (auto p = Tsstore.begin(); p != Tsstore.end(); p++)
+    //   read only transactionの場合、automarically commit
+    bool isEmpty = tx->worker.empty();
+    if (isEmpty == true)
     {
-        std::cout << p->startTs << std::endl;
-        std::cout << p->commitTs << std::endl;
+        tx->status = 1;
+        tx->commitTs = 0;
+        return;
+    }
+    else
+    {
+        tx->commitTs = gettimestamp();
+        Tscomparison(tx); // 判定
+
+        if (tx->status == 2)
+        {
+            // abort
+            rollback(tx);
+        }
+        else if (tx->status == 0)
+        {
+            // commit
+            setTimestamp(tx);
+            tx->status = 1;
+            commit(tx);
+        }
     }
 }
 
-// transactionの中身を表示
+void show_database(void)
+{
+    std::cout << " " << std::endl;
+    std::cout << "-------database--------" << std::endl;
+    for (int i = 0; i < N; i++)
+    {
+        printf("%d ", database[i][database.at(i).size() - 1].key);
+    }
+}
+
+void show_Tsstore(void)
+{
+    std::cout << "----保存されているtimestamp----" << std::endl;
+    for (auto p = Tsstore.begin(); p != Tsstore.end(); p++)
+    {
+        printf("(%d,%d)", p->startTs, p->commitTs);
+    }
+}
+
 void show_transaction(txdef *tx)
 {
     std::lock_guard<std::mutex> lock(showmtx_);
@@ -302,9 +295,8 @@ void ThreadA()
 {
     // transaction t1の実行
     txdef t1 = generate_transaction();
-
     execution(&t1);
-    validation(&t1, database);
+    validation(&t1);
     show_transaction(&t1);
 }
 
@@ -312,9 +304,8 @@ void ThreadB()
 {
     // transaction t2の実行
     txdef t2 = generate_transaction();
-
     execution(&t2);
-    validation(&t2, database);
+    validation(&t2);
     show_transaction(&t2);
 }
 
@@ -322,9 +313,8 @@ void ThreadC()
 {
     // transaction t3の実行
     txdef t3 = generate_transaction();
-
     execution(&t3);
-    validation(&t3, database);
+    validation(&t3);
     show_transaction(&t3);
 }
 
@@ -340,10 +330,6 @@ int main()
     th_b.join();
     th_c.join();
 
-    show_identifier();
-
-    // databaseの状態を表示
-    show_database();
-
-    return 0;
+    show_Tsstore();  // Tsstoreを表示
+    show_database(); // databaseを表示
 }
