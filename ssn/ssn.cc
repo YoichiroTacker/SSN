@@ -52,7 +52,7 @@ class nodedef
 public:
     int v_cstamp;    // version creation stamp
     int v_etastamp;  // version access stamp(mada tukattenai=0)
-    float v_pistamp; // version successor stamp(mada tukattenai=00)
+    int v_pistamp;   // version successor stamp(mada tukattenai=00)
     nodedef *v_prev; // pointer to the overritten version
     int key;
     int tuple;
@@ -62,7 +62,7 @@ class readsetdef
 {
 public:
     int v_etastamp;
-    float v_pistamp;
+    int v_pistamp;
     int key;
     int tuple;
 };
@@ -90,7 +90,7 @@ public:
     int t_sstamp;    // transaction start timestamp
     int t_cstamp;    // transaction commit timestamp
     int t_etastamp;  // predecessor high watermark η(T)
-    float t_pistamp; // successor low watermark π(T)
+    int t_pistamp;   // successor low watermark π(T)
     std::vector<nodedef> wworker;
     std::vector<readsetdef> rworker;
 };
@@ -103,10 +103,10 @@ void generate_database(void)
     nodedef tmp;
     for (int i = 0; i < N; i++)
     {
-        /*tmp.v_etastamp = 0;
-        tmp.v_pistamp = INFINITY;
+        tmp.v_etastamp = 0;
+        tmp.v_pistamp = 50000;
         tmp.v_prev = NULL;
-        tmp.tuple = i;*/
+        tmp.tuple = i;
         tmp.key = 0;
         tmp.v_cstamp = 0;
         database.at(i).push_back(tmp);
@@ -127,9 +127,11 @@ txdef generate_transaction()
 {
     txdef tx;
     int operation_size = get_rand(1, 10);
-    tx.t_sstamp = gettimestamp();
+    // tx.t_sstamp = gettimestamp();
+    tx.t_sstamp = 0;
     tx.status = txstatus::inflight;
-    tx.t_pistamp = INFINITY;
+    tx.t_pistamp = 5000;
+
     tx.t_cstamp = 0;
     tx.t_etastamp = 0;
 
@@ -152,7 +154,12 @@ txdef generate_transaction()
     return tx;
 }
 
-nodedef *specify_latestnodeversion(txdef *tx, int openum)
+void start_transaction(txdef *tx) // transactionのstart timestampを取得
+{
+    tx->t_sstamp = gettimestamp();
+}
+
+nodedef *specify_latestnodeversion(txdef *tx, int openum) // readを行うnode, overwriteするnodeを取得
 {
     nodedef *version = &database.at(tx->txinfo.at(openum).tuple).front();
     for (int v = 0; v < database.at(tx->txinfo.at(openum).tuple).size(); v++)
@@ -173,7 +180,7 @@ void verify_exclusion_or_abort(txdef *tx) // exclusion window testing
     }
 }
 
-void ssn_write(txdef *tx, nodedef *version, int i)
+void ssn_write(txdef *tx, nodedef *version, int i) // 論文に準拠
 {
     // if v not in t.writes:
     // update \eta(t) with w:r edge
@@ -200,16 +207,7 @@ void ssn_write(txdef *tx, nodedef *version, int i)
     verify_exclusion_or_abort(tx);
 }
 
-void write(txdef *tx, nodedef *version, int i)
-{
-    nodedef tmp;
-    tmp.key = tx->txinfo.at(i).key;
-    tmp.v_cstamp = tx->t_sstamp;
-    tmp.tuple = tx->txinfo.at(i).tuple;
-    tx->wworker.push_back(tmp);
-}
-
-void ssn_read(txdef *tx, nodedef *version, int num)
+void ssn_read(txdef *tx, nodedef *version, int num) // 論文に準拠
 {
 
     // if v not in t.writes:(read関数で行う)
@@ -235,17 +233,7 @@ void ssn_read(txdef *tx, nodedef *version, int num)
     verify_exclusion_or_abort(tx);
 }
 
-void read(txdef *tx, nodedef *version)
-{
-    readsetdef tmp;
-    tmp.key = version->key;
-    tmp.tuple = version->tuple;
-    tmp.v_pistamp = version->v_pistamp;
-    tx->rworker.push_back(tmp);
-}
-
-// transactionの実行
-void ssn_execution(txdef *tx)
+void ssn_execution(txdef *tx) // transactionの実行
 {
     nodedef *version;
 
@@ -265,13 +253,12 @@ void ssn_execution(txdef *tx)
     }
 }
 
-// commit phase
-void commit(txdef *tx)
+void commit(txdef *tx) // transactionをcommit
 {
     pthread_mutex_lock(&dbmtx_);
     for (auto p = tx->wworker.begin(); p != tx->wworker.end(); p++)
     {
-        database.at(p->tuple).emplace_back(*p);
+        database.at(p->tuple).push_back(*p);
     }
     pthread_mutex_unlock(&dbmtx_);
 }
@@ -292,71 +279,53 @@ void SIcomparison(txdef *tx)
     }
     else
     {
-        pthread_mutex_lock(&txtablemtx_);
-        bool isEmpty = transaction_table.empty();
-        if (isEmpty == false)
-        {
-            for (auto p = transaction_table.begin(); p != transaction_table.end(); p++)
-            {
-                // first committers wins
-                if (((p->t_sstamp < tx->t_sstamp && tx->t_sstamp < p->t_cstamp) || (tx->t_sstamp < p->t_sstamp && p->t_sstamp < tx->t_cstamp)) && p->t_cstamp < tx->t_cstamp)
-                {
-                    tx->status = txstatus::aborted; // abort
-                }
-                else
-                {
-                    tx->status = txstatus::committed; // commit
-                }
-            }
-        }
-        else // isEmpty == true(transaction_tableが空なら)
+        //   read only transactionの場合、automarically commit
+        bool isEmpty = tx->wworker.empty();
+        if (isEmpty == true)
         {
             tx->status = txstatus::committed;
+            return;
         }
-
-        if (tx->status == txstatus::committed)
+        else
         {
-            setTimestamp(tx); // transaction_tableに追加
-        }
+            pthread_mutex_lock(&txtablemtx_);
+            isEmpty = transaction_table.empty();
+            if (isEmpty == false)
+            {
+                for (auto p = transaction_table.begin(); p != transaction_table.end(); p++)
+                {
+                    // first committers wins
+                    if (((p->t_sstamp < tx->t_sstamp && tx->t_sstamp < p->t_cstamp) || (tx->t_sstamp < p->t_sstamp && p->t_sstamp < tx->t_cstamp)) && p->t_cstamp < tx->t_cstamp)
+                    {
+                        tx->status = txstatus::aborted; // abort
+                    }
+                    else
+                    {
+                        tx->status = txstatus::committed; // commit
+                    }
+                }
+            }
+            else // isEmpty == true(transaction_tableが空なら)
+            {
+                tx->status = txstatus::committed;
+            }
 
-        pthread_mutex_unlock(&txtablemtx_);
+            if (tx->status == txstatus::committed)
+            {
+                setTimestamp(tx); // transaction_tableに追加
+            }
+
+            pthread_mutex_unlock(&txtablemtx_);
+        }
     }
 }
 
-// validation phase
-void validation(txdef *tx)
+void ssn_commit(txdef *tx) // 論文に準拠
 {
-
-    bool isEmpty = tx->wworker.empty();
-    if (isEmpty == true)
-    {
-        tx->status = txstatus::committed; // read-only transactionはcommit
-        tx->t_cstamp = 0;
-        tx_showtable.push_back(*tx);
-    }
-    else
+    if (tx->status == txstatus::inflight)
     {
         tx->t_cstamp = gettimestamp();
-        SIcomparison(tx); // SIの判定
-
-        if (tx->status == txstatus::aborted)
-        {
-            // abort
-            tx_showtable.push_back(*tx);
-        }
-        else //(tx->status == txstatus::committed)
-        {
-            // commit
-            // setTimestamp(tx);
-            tx_showtable.push_back(*tx);
-            commit(tx);
-        }
     }
-}
-
-void ssn_commit(txdef *tx)
-{
-    tx->t_cstamp = gettimestamp();
 
     // finalize \pi(T)
     tx->t_pistamp = std::min<int>(tx->t_pistamp, tx->t_cstamp);
@@ -398,20 +367,18 @@ void show_database(void)
 {
     std::cout << " " << std::endl;
     std::cout << "-------database--------" << std::endl;
-    /*for (int i = 0; i < N; i++)
-    {
-        printf("%d ", database[i][database.at(i).size() - 1].key);
-    }*/
     for (int i = 0; i < N; i++)
     {
+        printf("vector[");
+        printf("%d", i);
+        printf("] ");
         for (int j = 0; j < database.at(i).size(); j++)
         {
             printf("%d ", database[i][j].key);
         }
-        std::cout << "vector[" << i << "]" << std::endl;
+        std::cout << " " << std::endl;
     }
 }
-
 void show_txtable(void)
 {
     std::cout << "----保存されているtimestamp----" << std::endl;
@@ -439,6 +406,7 @@ void show_transaction(void)
         }
 
         std::cout << "startTimestamp:" << p->t_sstamp << " commitTimestamp:" << p->t_cstamp << std::endl;
+        std::cout << "pistamp:" << p->t_pistamp << " etastamp:" << p->t_etastamp << std::endl;
 
         for (auto q = p->txinfo.begin(); q != p->txinfo.end(); q++)
         {
@@ -453,19 +421,19 @@ void show_transaction(void)
         }
     }
 }
+
 void *function(void *arg)
 {
-    // transaction txの実行
-    int j = get_rand(1, 5); // 1threadあたりの発行トランザクション数
-    for (int i = 0; i < j; i++)
+    std::vector<txdef> *tx = (std::vector<txdef> *)arg;
+
+    //  transaction txの実行
+    for (auto p = tx->begin(); p != tx->end(); p++)
     {
-        txdef *tx = (txdef *)malloc(sizeof(txdef));
-        *tx = generate_transaction();
-        ssn_execution(tx);
-        // validation(tx);
-        ssn_commit(tx);
-        free(tx);
+        start_transaction(&(*p));
+        ssn_execution(&(*p));
+        ssn_commit(&(*p));
     }
+
     return NULL;
 }
 
@@ -479,9 +447,22 @@ int main()
 
     pthread_t thread[NUM_THREAD];
 
+    // transactionの生成
+    std::vector<std::vector<class txdef>> txtx(NUM_THREAD, std::vector<txdef>(0));
     for (int i = 0; i < NUM_THREAD; i++)
     {
-        pthread_create(&thread[i], NULL, function, NULL);
+        int NUM_transaction = get_rand(1, 5);
+        for (int j = 0; j < NUM_transaction; j++)
+        {
+            txdef tmp;
+            tmp = generate_transaction();
+            txtx.at(i).push_back(tmp);
+        }
+    }
+
+    for (int i = 0; i < NUM_THREAD; i++)
+    {
+        pthread_create(&thread[i], NULL, function, &txtx[i]);
     }
 
     for (int i = 0; i < NUM_THREAD; i++)
