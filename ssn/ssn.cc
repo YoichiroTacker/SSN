@@ -14,13 +14,11 @@
 
 #define N 10 // databaseのサイズ
 #define NUM_THREAD 3
+#define NUM_TRANSACTION 5
 
 int counter = 0;           // timestamp用のcounter
 pthread_mutex_t countmtx_; // timestampのlock
 pthread_mutex_t showmtx_;  // transaction表示用のlock
-
-std::vector<std::vector<class nodedef>> database(N); // database
-pthread_mutex_t dbmtx_;                              // database用のlock
 
 class txtabledef
 {
@@ -97,6 +95,9 @@ public:
 
 std::vector<class txdef> tx_showtable; // transaction表示用vector
 
+std::vector<std::vector<class nodedef>> database(N, std::vector<nodedef>(0)); // database
+pthread_mutex_t dbmtx_;                                                       // database用のlock
+
 // databaseを生成して初期化
 void generate_database(void)
 {
@@ -134,6 +135,8 @@ txdef generate_transaction()
 
     tx.t_cstamp = 0;
     tx.t_etastamp = 0;
+    // std::vector<nodedef> wworker(10);
+    // std::vector<readsetdef> rworker(10);
 
     for (int i = 0; i < operation_size; i++)
     {
@@ -149,7 +152,7 @@ txdef generate_transaction()
             tmp.key = get_rand(0, 100);
         }
         tmp.tuple = get_rand(0, N - 1);
-        tx.txinfo.emplace_back(tmp);
+        tx.txinfo.push_back(tmp);
     }
     return tx;
 }
@@ -174,9 +177,12 @@ nodedef *specify_latestnodeversion(txdef *tx, int openum) // readを行うnode, 
 
 void verify_exclusion_or_abort(txdef *tx) // exclusion window testing
 {
-    if (tx->t_pistamp <= tx->t_etastamp)
+    if (tx->status == txstatus::inflight)
     {
-        tx->status = txstatus::aborted;
+        if (tx->t_pistamp <= tx->t_etastamp)
+        {
+            tx->status = txstatus::aborted;
+        }
     }
 }
 
@@ -242,12 +248,10 @@ void ssn_execution(txdef *tx) // transactionの実行
         version = specify_latestnodeversion(tx, i);
         if (tx->txinfo.at(i).operation == txop::READ)
         {
-            // read(tx, version);
             ssn_read(tx, version, i);
         }
         else if (tx->txinfo.at(i).operation == txop::WRITE)
         {
-            // write(tx, version, i);
             ssn_write(tx, version, i);
         }
     }
@@ -273,18 +277,13 @@ void setTimestamp(txdef *tx) // timestampを設定
 
 void SIcomparison(txdef *tx)
 {
-    if (tx->status == txstatus::aborted)
-    {
-        return;
-    }
-    else
+    if (tx->status == txstatus::inflight)
     {
         //   read only transactionの場合、automarically commit
         bool isEmpty = tx->wworker.empty();
         if (isEmpty == true)
         {
             tx->status = txstatus::committed;
-            return;
         }
         else
         {
@@ -341,8 +340,8 @@ void ssn_commit(txdef *tx) // 論文に準拠
     }
 
     // verify_exclusion_or_abort(t)
-    verify_exclusion_or_abort(tx); // exclusion window
-    SIcomparison(tx);              // SI verification
+    // verify_exclusion_or_abort(tx); // exclusion window
+    // SIcomparison(tx);              // SI verification
     tx_showtable.push_back(*tx);
     if (tx->status == txstatus::committed) // post-commit begins
     {
@@ -356,7 +355,7 @@ void ssn_commit(txdef *tx) // 論文に準拠
         for (auto p = tx->wworker.begin(); p != tx->wworker.end(); p++)
         {
             p->v_prev->v_pistamp = tx->t_pistamp;
-            // initialize new version
+            //  initialize new version
             p->v_cstamp = p->v_etastamp = tx->t_cstamp;
         }
         commit(tx);
@@ -433,7 +432,6 @@ void *function(void *arg)
         ssn_execution(&(*p));
         ssn_commit(&(*p));
     }
-
     return NULL;
 }
 
@@ -451,7 +449,7 @@ int main()
     std::vector<std::vector<class txdef>> txtx(NUM_THREAD, std::vector<txdef>(0));
     for (int i = 0; i < NUM_THREAD; i++)
     {
-        int NUM_transaction = get_rand(1, 5);
+        int NUM_transaction = get_rand(1, 3);
         for (int j = 0; j < NUM_transaction; j++)
         {
             txdef tmp;
