@@ -11,21 +11,20 @@
 #include <algorithm>
 #include <math.h>
 #include <pthread.h>
-#include <atomic>
 
-#define N 100                    // databaseのサイズ
-#define NUM_THREAD 4             // Thread数
-#define MAX_NUM_TRANSACTION 1000 // 1スレッドで処理する最大トランザクション数
-#define MIN_NUM_TRANSACTION 1000 // 1スレッドで処理する最小トランザクション数
-#define MAX_NUM_OPERATION 10     // 1トランザクションあたりの最大オペレーション数
-#define MIN_NUM_OPERATION 10     // 1トランザクションあたりの最小オペレーション数
+#define N 10                      // databaseのサイズ
+#define NUM_THREAD 3              // Thread数
+#define MAX_NUM_TRANSACTION 10000 // 1スレッドで処理する最大トランザクション数
+#define MIN_NUM_TRANSACTION 10000 // 1スレッドで処理する最小トランザクション数
+#define MAX_NUM_OPERATION 10      // 1トランザクションあたりの最大オペレーション数
+#define MIN_NUM_OPERATION 1       // 1トランザクションあたりの最小オペレーション数
 // read:write = 1:1
 
 int commitcounter = 0;
 int txcounter = 0;
 
-// int counter = 0;           // timestamp用のcounter
-// pthread_mutex_t countmtx_; // timestampのlock
+int counter = 0;           // timestamp用のcounter
+pthread_mutex_t countmtx_; // timestampのlock
 
 class txtabledef
 {
@@ -38,16 +37,13 @@ std::vector<class txtabledef> transaction_table; // timestamp store
 pthread_mutex_t txtablemtx_;                     // transaction_table用lock
 
 // timestamp
-/*int gettimestamp(void)
+int gettimestamp(void)
 {
     pthread_mutex_lock(&countmtx_);
     counter++;
     pthread_mutex_unlock(&countmtx_);
     return counter;
-}*/
-
-std::atomic<int> timestamp(1);
-std::atomic<int> TID(10000000);
+}
 
 enum class txop
 {
@@ -93,7 +89,6 @@ enum class txstatus
 class txdef
 {
 public:
-    int tid;
     std::vector<ope> txinfo;
     txstatus status; // inflight, committed, aborted
     int t_sstamp;    // transaction start timestamp
@@ -168,9 +163,7 @@ txdef generate_transaction()
 
 void start_transaction(txdef *tx) // transactionのstart timestampを取得
 {
-    // tx->t_sstamp = gettimestamp();
-    tx->t_sstamp = std::atomic_fetch_add(&timestamp, 1);
-    tx->tid = std::atomic_fetch_add(&TID, 1);
+    tx->t_sstamp = gettimestamp();
 }
 
 nodedef *specify_latestnodeversion(txdef *tx, int openum) // readを行うnode, overwriteするnodeを取得
@@ -226,35 +219,28 @@ void ssn_write(txdef *tx, nodedef *version, int i) // 論文に準拠
 
 void ssn_read(txdef *tx, nodedef *version, int num) // 論文に準拠
 {
-    if (version->v_cstamp == 0) // 存在しないversionのread operation
+
+    // if v not in t.writes:(read関数で行う)
+    //  update \eta(t) with w:r edges
+    tx->t_etastamp = std::max(tx->t_etastamp, version->v_cstamp);
+
+    if (version->v_pistamp == INFINITY)
     {
-        return;
+        // t.reads.add(v);
+        readsetdef tmp;
+        tmp.key = version->key;
+        tmp.tuple = version->tuple;
+        tmp.v_pistamp = version->v_pistamp;
+        tx->rworker.push_back(tmp);
+        // tx->txinfo.at(num).key = version->key;
     }
     else
     {
-
-        // if v not in t.writes:(read関数で行う)
-        //  update \eta(t) with w:r edges
-        tx->t_etastamp = std::max(tx->t_etastamp, version->v_cstamp);
-
-        if (version->v_pistamp == INFINITY)
-        {
-            // t.reads.add(v);
-            readsetdef tmp;
-            tmp.key = version->key;
-            tmp.tuple = version->tuple;
-            tmp.v_pistamp = version->v_pistamp;
-            tx->rworker.push_back(tmp);
-            // tx->txinfo.at(num).key = version->key;
-        }
-        else
-        {
-            // update \pi(t) with r:w edge
-            tx->t_pistamp = std::min<int>(tx->t_pistamp, version->v_pistamp);
-        }
-        // verify_exclusion_or_abort(t)
-        verify_exclusion_or_abort(tx);
+        // update \pi(t) with r:w edge
+        tx->t_pistamp = std::min<int>(tx->t_pistamp, version->v_pistamp);
     }
+    // verify_exclusion_or_abort(t)
+    verify_exclusion_or_abort(tx);
 }
 
 void ssn_execution(txdef *tx) // transactionの実行
@@ -280,15 +266,7 @@ void commit(txdef *tx) // transactionをcommit
     // pthread_mutex_lock(&dbmtx_);
     for (auto p = tx->wworker.begin(); p != tx->wworker.end(); p++)
     {
-        // database.at(p->tuple).push_back(*p);
-        nodedef tmp;
-        tmp.v_cstamp = p->v_cstamp;
-        tmp.v_etastamp = p->v_etastamp;
-        tmp.v_pistamp = p->v_pistamp;
-        tmp.v_prev = p->v_prev;
-        tmp.key = p->key;
-        tmp.tuple = p->tuple;
-        database.at(tmp.tuple).emplace_back(tmp);
+        database.at(p->tuple).push_back(*p);
     }
     // pthread_mutex_unlock(&dbmtx_);
 }
@@ -346,13 +324,11 @@ void SIcomparison(txdef *tx)
 
 void ssn_commit(txdef *tx) // 論文に準拠
 {
-
+    pthread_mutex_lock(&dbmtx_);
     if (tx->status == txstatus::inflight)
     {
-        // tx->t_cstamp = gettimestamp();
-        tx->t_cstamp = std::atomic_fetch_add(&timestamp, 1);
+        tx->t_cstamp = gettimestamp();
     }
-    pthread_mutex_lock(&dbmtx_);
 
     // finalize \pi(T)
     tx->t_pistamp = std::min<int>(tx->t_pistamp, tx->t_cstamp);
@@ -476,13 +452,12 @@ void *function(void *arg)
         ssn_execution(&(*p));
         ssn_commit(&(*p));
     }
-    tx->clear(); // transactionの表示
     return NULL;
 }
 
 int main()
 {
-    // pthread_mutex_init(&countmtx_, NULL);
+    pthread_mutex_init(&countmtx_, NULL);
     pthread_mutex_init(&dbmtx_, NULL);
     pthread_mutex_init(&txtablemtx_, NULL);
 
@@ -523,24 +498,19 @@ int main()
     std::cout << msec << " milli sec \n";
 
     // show_transaction(txtx); // transactionの表示
-    // show_txtable();  // transaction table(timestamp)を表示
+    //  show_txtable();         // transaction table(timestamp)を表示
     // show_database(); // databaseを表示
 
     // 結果出力
-    // std::cout << "commit transaction数:" << commitcounter << std::endl;
-    // std::cout << "合計transaction数:" << txcounter << std::endl;
+    std::cout << "commit transaction数:" << commitcounter << std::endl;
+    std::cout << "合計transaction数:" << txcounter << std::endl;
     int abortcounter = txcounter - commitcounter;
     std::cout << "abort率:" << round(double(abortcounter) * 100 / double(txcounter)) << "%" << std::endl;
     int TPS;
     TPS = round(double(commitcounter) / (msec - 1000) * 1000);
     std::cout << "TPS: " << TPS << "tps" << std::endl;
 
-    // pthread_mutex_destroy(&countmtx_);
+    pthread_mutex_destroy(&countmtx_);
     pthread_mutex_destroy(&dbmtx_);
     pthread_mutex_destroy(&txtablemtx_);
-
-    transaction_table.clear();
-    database.clear();
-
-    // std::cout << timestamp.load() << std::endl;
 }

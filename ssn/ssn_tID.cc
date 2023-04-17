@@ -14,7 +14,7 @@
 #include <atomic>
 
 #define N 100                    // databaseのサイズ
-#define NUM_THREAD 4             // Thread数
+#define NUM_THREAD 2             // Thread数
 #define MAX_NUM_TRANSACTION 1000 // 1スレッドで処理する最大トランザクション数
 #define MIN_NUM_TRANSACTION 1000 // 1スレッドで処理する最小トランザクション数
 #define MAX_NUM_OPERATION 10     // 1トランザクションあたりの最大オペレーション数
@@ -23,9 +23,6 @@
 
 int commitcounter = 0;
 int txcounter = 0;
-
-// int counter = 0;           // timestamp用のcounter
-// pthread_mutex_t countmtx_; // timestampのlock
 
 class txtabledef
 {
@@ -36,15 +33,6 @@ public:
 
 std::vector<class txtabledef> transaction_table; // timestamp store
 pthread_mutex_t txtablemtx_;                     // transaction_table用lock
-
-// timestamp
-/*int gettimestamp(void)
-{
-    pthread_mutex_lock(&countmtx_);
-    counter++;
-    pthread_mutex_unlock(&countmtx_);
-    return counter;
-}*/
 
 std::atomic<int> timestamp(1);
 std::atomic<int> TID(10000000);
@@ -137,15 +125,12 @@ txdef generate_transaction()
 {
     txdef tx;
     int operation_size = get_rand(MIN_NUM_OPERATION, MAX_NUM_OPERATION);
-    // tx.t_sstamp = gettimestamp();
     tx.t_sstamp = 0;
     tx.status = txstatus::inflight;
     tx.t_pistamp = 500000;
 
     tx.t_cstamp = 0;
     tx.t_etastamp = 0;
-    // std::vector<nodedef> wworker(10);
-    // std::vector<readsetdef> rworker(10);
 
     for (int i = 0; i < operation_size; i++)
     {
@@ -168,9 +153,9 @@ txdef generate_transaction()
 
 void start_transaction(txdef *tx) // transactionのstart timestampを取得
 {
-    // tx->t_sstamp = gettimestamp();
     tx->t_sstamp = std::atomic_fetch_add(&timestamp, 1);
     tx->tid = std::atomic_fetch_add(&TID, 1);
+    // tx->t_cstamp = tx->tid;
 }
 
 nodedef *specify_latestnodeversion(txdef *tx, int openum) // readを行うnode, overwriteするnodeを取得
@@ -205,7 +190,7 @@ void ssn_write(txdef *tx, nodedef *version, int i) // 論文に準拠
     // t.writes.add(v)
     nodedef tmp;
     tmp.key = tx->txinfo.at(i).key;
-    tmp.v_cstamp = tx->t_sstamp;
+    tmp.v_cstamp = tx->tid; // tidに設定
     tmp.tuple = tx->txinfo.at(i).tuple;
     tmp.v_prev = version;
     tmp.v_etastamp = tx->t_etastamp;
@@ -277,7 +262,7 @@ void ssn_execution(txdef *tx) // transactionの実行
 
 void commit(txdef *tx) // transactionをcommit
 {
-    // pthread_mutex_lock(&dbmtx_);
+    pthread_mutex_lock(&dbmtx_);
     for (auto p = tx->wworker.begin(); p != tx->wworker.end(); p++)
     {
         // database.at(p->tuple).push_back(*p);
@@ -290,7 +275,7 @@ void commit(txdef *tx) // transactionをcommit
         tmp.tuple = p->tuple;
         database.at(tmp.tuple).emplace_back(tmp);
     }
-    // pthread_mutex_unlock(&dbmtx_);
+    pthread_mutex_unlock(&dbmtx_);
 }
 
 void setTimestamp(txdef *tx) // timestampを設定
@@ -301,14 +286,15 @@ void setTimestamp(txdef *tx) // timestampを設定
     transaction_table.push_back(tmp);
 }
 
-void SIcomparison(txdef *tx)
+void si_commit(txdef *tx)
 {
     if (tx->status == txstatus::inflight)
     {
         bool isEmpty = tx->wworker.empty(); //   read only transactionの場合、automarically commit
         if (isEmpty == true)
         {
-            tx->status = txstatus::committed;
+            // tx->status = txstatus::committed;
+            return;
         }
         else
         {
@@ -323,23 +309,30 @@ void SIcomparison(txdef *tx)
                     {
                         tx->status = txstatus::aborted; // abort
                     }
-                    else
-                    {
-                        tx->status = txstatus::committed; // commit
-                    }
                 }
             }
-            else // isEmpty == true(transaction_tableが空なら)
-            {
-                tx->status = txstatus::committed;
-            }
-
-            if (tx->status == txstatus::committed)
+            if (tx->status != txstatus::aborted)
             {
                 setTimestamp(tx); // transaction_tableに追加
             }
 
             pthread_mutex_unlock(&txtablemtx_);
+        }
+    }
+    commit(tx);
+}
+
+void initialize_version_committed(txdef *tx, int openum)
+{
+    nodedef *version = &database.at(tx->txinfo.at(openum).tuple).front();
+    for (int v = 0; v < database.at(tx->txinfo.at(openum).tuple).size(); v++)
+    {
+        for (int i = 0; i < tx->wworker.size(); i++)
+        {
+            if (database.at(tx->txinfo.at(openum).tuple).at(v).key == tx->wworker.at(i).key && database.at(tx->txinfo.at(openum).tuple).at(v).v_cstamp == tx->tid)
+            {
+                database.at(tx->txinfo.at(openum).tuple).at(v).v_cstamp = std::atomic_fetch_add(&timestamp, 1);
+            }
         }
     }
 }
@@ -349,7 +342,6 @@ void ssn_commit(txdef *tx) // 論文に準拠
 
     if (tx->status == txstatus::inflight)
     {
-        // tx->t_cstamp = gettimestamp();
         tx->t_cstamp = std::atomic_fetch_add(&timestamp, 1);
     }
     pthread_mutex_lock(&dbmtx_);
@@ -373,7 +365,6 @@ void ssn_commit(txdef *tx) // 論文に準拠
     {
         tx->status = txstatus::committed;
     }
-    // SIcomparison(tx);              // SI verification
 
     // transactionの処理完了フラグ
     if (tx->status == txstatus::committed)
@@ -397,7 +388,10 @@ void ssn_commit(txdef *tx) // 論文に準拠
             p->v_cstamp = p->v_etastamp = tx->t_cstamp;
         }
 
-        commit(tx);
+        for (int i = 0; i < tx->wworker.size(); i++)
+        {
+            initialize_version_committed(tx, i);
+        }
     }
     pthread_mutex_unlock(&dbmtx_);
 }
@@ -418,6 +412,7 @@ void show_database(void)
         std::cout << " " << std::endl;
     }
 }
+
 void show_txtable(void)
 {
     std::cout << "----保存されているtimestamp----" << std::endl;
@@ -474,6 +469,7 @@ void *function(void *arg)
     {
         start_transaction(&(*p));
         ssn_execution(&(*p));
+        si_commit(&(*p));
         ssn_commit(&(*p));
     }
     tx->clear(); // transactionの表示
@@ -535,12 +531,9 @@ int main()
     TPS = round(double(commitcounter) / (msec - 1000) * 1000);
     std::cout << "TPS: " << TPS << "tps" << std::endl;
 
-    // pthread_mutex_destroy(&countmtx_);
     pthread_mutex_destroy(&dbmtx_);
     pthread_mutex_destroy(&txtablemtx_);
 
     transaction_table.clear();
     database.clear();
-
-    // std::cout << timestamp.load() << std::endl;
 }
