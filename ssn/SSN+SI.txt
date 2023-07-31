@@ -1,0 +1,107 @@
+void ssn_write(*tx, *version)  //*tx=トランザクションのポインタ, *version=書き込みたいnodeの最新version
+{
+    update \eta(t) with w:r edge;
+    txのwrite setにversionを追加;
+    txのread setからversionを除外; (avoid false positive)
+    verify_exclusion_or_abort(tx);
+}
+
+void ssn_read(*tx, *version)
+{
+    if (存在しないversionのread operation)
+    {
+        return;
+    }
+    else
+    {
+        update \eta(t) with w:r edges;
+        if (version->v_pistamp == INFINITY)
+        {
+            txのread setにversionを追加;
+        }
+        else
+        {
+            update \pi(t) with r:w edge;
+        }
+        verify_exclusion_or_abort(t);
+    }
+}
+
+void si_commit(txdef *tx)
+{
+    if (txがinflight status)
+    {
+        if (txのwworkerが空=>write opetationがない)
+        {
+            tx->status = committed;
+            return;
+        }
+        else
+        {
+            pthread_mutex_lock(&txtablemtx_);
+            if (transaction_tableが空じゃない)
+            {
+                    if(txのstart timestamp <transaction_tableに保存されている最小のcommit timestamp)　// first committers wins
+                    {
+                        tx->status = txstatus::aborted;
+                    }
+            }
+            if (tx->statusがinflight or committed)
+            {
+                transaction_tableにtimstampを追加;
+            }
+            pthread_mutex_unlock(&txtablemtx_);
+        }
+    }
+    DBにwworkerをインストール;
+}
+
+#問題
+SI実装ではversionのcommit timestampにTIDを格納しておくことでversion-installed but uncommittedを表すことができる
+→SSN committedまではcstampを更新したくない
+
+#疑問
+TIDをそもそも格納する必要ある？
+Txはcommitされるまでworker上でしか操作されないのだからtx statusで管理できるのではないか？
+operationごとにデータベースを更新するならまだわかるのだが...
+
+void ssn_commit(txdef *tx)
+{
+
+    if (tx->status == txstatus::inflight)
+    {
+        txのcommit timestampを設定;
+    }
+
+    pthread_mutex_lock(&dbmtx_);
+    t.sstamp = min(t.sstamp, t.cstamp)
+    for v in tx.rworker
+    {
+        finalize \pi(T);
+    }
+    
+    for v in tx.wworker
+    {
+        finalize \eta(T);
+    }
+    verify_exclusion_or_abort(tx); // exclusion window testing
+    
+    tx->status = txstatus::committed;
+    //commitcounter++;
+
+    if (tx->status == txstatus::committed) // post-commit begins
+    {
+        for v in tx.rworker
+        {
+            update \eta(v);
+        }
+        
+        for v in tx.wworker
+        {
+            update \pi(v);
+            //  initialize new version
+            p->v_cstamp = p->v_etastamp = tx->t_cstamp;
+        }
+    }
+    pthread_mutex_unlock(&dbmtx_);
+}

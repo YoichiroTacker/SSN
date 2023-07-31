@@ -83,7 +83,8 @@ enum class txstatus
 {
     inflight,
     committed,
-    aborted
+    aborted,
+    committing
 };
 
 class txdef
@@ -376,6 +377,63 @@ void ssn_commit(txdef *tx) // 論文に準拠
         commit(tx);
     }
     pthread_mutex_unlock(&dbmtx_);
+}
+
+void ssn_parallel_commit(txdef *tx) // Algorithm 3
+{
+    
+    if (tx->status == txstatus::inflight)
+    {
+        tx->t_cstamp = gettimestamp();
+        tx->status = txstatus::committing;
+    }
+
+    // finalize \pi(T)
+    tx->t_pistamp = std::min<int>(tx->t_pistamp, tx->t_cstamp);
+    for (auto p = tx->rworker.begin(); p != tx->rworker.end(); p++)
+    {
+        //tx->t_pistamp = std::min<int>(tx->t_pistamp, p->v_pistamp);
+        p->v_pistamp = 
+    }
+
+    // finalize \eta(T)
+    for (auto p = tx->wworker.begin(); p != tx->wworker.end(); p++)
+    {
+        tx->t_etastamp = std::max<int>(tx->t_etastamp, p->v_prev->v_etastamp);
+    }
+
+    // verify_exclusion_or_abort(t)
+    verify_exclusion_or_abort(tx); // exclusion window testing
+    if (tx->status == txstatus::inflight)
+    {
+        tx->status = txstatus::committed;
+    }
+    // SIcomparison(tx);              // SI verification
+
+    // transactionの処理完了フラグ
+    if (tx->status == txstatus::committed)
+    {
+        commitcounter++;
+    }
+
+    if (tx->status == txstatus::committed) // post-commit begins
+    {
+
+        // update \eta(v)
+        for (auto p = tx->rworker.begin(); p != tx->rworker.end(); p++)
+        {
+            p->v_etastamp = std::max<int>(p->v_etastamp, tx->t_cstamp);
+        }
+        // update \pi(v)
+        for (auto p = tx->wworker.begin(); p != tx->wworker.end(); p++)
+        {
+            p->v_prev->v_pistamp = tx->t_pistamp;
+            //  initialize new version
+            p->v_cstamp = p->v_etastamp = tx->t_cstamp;
+        }
+
+        commit(tx);
+    }
 }
 
 void show_database(void)

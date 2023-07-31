@@ -13,12 +13,12 @@
 #include <pthread.h>
 #include <atomic>
 
-#define N 100                    // databaseのサイズ
-#define NUM_THREAD 4             // Thread数
-#define MAX_NUM_TRANSACTION 1000 // 1スレッドで処理する最大トランザクション数
-#define MIN_NUM_TRANSACTION 1000 // 1スレッドで処理する最小トランザクション数
-#define MAX_NUM_OPERATION 10     // 1トランザクションあたりの最大オペレーション数
-#define MIN_NUM_OPERATION 10     // 1トランザクションあたりの最小オペレーション数
+#define N 100                   // databaseのサイズ
+#define NUM_THREAD 3            // Thread数
+#define MAX_NUM_TRANSACTION 100 // 1スレッドで処理する最大トランザクション数
+#define MIN_NUM_TRANSACTION 100 // 1スレッドで処理する最小トランザクション数
+#define MAX_NUM_OPERATION 10    // 1トランザクションあたりの最大オペレーション数
+#define MIN_NUM_OPERATION 10    // 1トランザクションあたりの最小オペレーション数
 // read:write = 1:1
 
 int commitcounter = 0;
@@ -140,7 +140,7 @@ txdef generate_transaction()
     // tx.t_sstamp = gettimestamp();
     tx.t_sstamp = 0;
     tx.status = txstatus::inflight;
-    tx.t_pistamp = 500000;
+    tx.t_pistamp = INFINITY;
 
     tx.t_cstamp = 0;
     tx.t_etastamp = 0;
@@ -413,7 +413,8 @@ void show_database(void)
         printf("] ");
         for (int j = 0; j < database.at(i).size(); j++)
         {
-            printf("%d ", database[i][j].key);
+            // printf("%d ", database[i][j].key);
+            printf("%d(%d, %d)", database[i][j].key, database[i][j].v_etastamp, database[i][j].v_pistamp);
         }
         std::cout << " " << std::endl;
     }
@@ -476,7 +477,7 @@ void *function(void *arg)
         ssn_execution(&(*p));
         ssn_commit(&(*p));
     }
-    tx->clear(); // transactionの表示
+    // tx->clear(); // transactionの表示
     return NULL;
 }
 
@@ -523,8 +524,8 @@ int main()
     std::cout << msec << " milli sec \n";
 
     // show_transaction(txtx); // transactionの表示
-    // show_txtable();  // transaction table(timestamp)を表示
-    // show_database(); // databaseを表示
+    // show_txtable();         // transaction table(timestamp)を表示
+    show_database(); // databaseを表示
 
     // 結果出力
     // std::cout << "commit transaction数:" << commitcounter << std::endl;
